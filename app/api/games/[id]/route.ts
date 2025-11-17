@@ -1,17 +1,62 @@
 import { NextRequest, NextResponse } from "next/server";
-import { games } from "@/lib/games-data";
-import { Game } from "@/types/game";
+import pool from "@/lib/db";
+import { gameSchema, idSchema } from "@/lib/validation";
+import { verifyToken } from "@/lib/auth";
 
+// GET /api/games/[id] - Get a single game by ID
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    // Verify authentication
+    const user = verifyToken(request);
+    if (!user) {
+      return NextResponse.json(
+        { success: false, error: "Access token required" },
+        { status: 401 }
+      );
+    }
+
     const { id } = await params;
 
-    const game = games.find((g) => g.id === id);
+    // Validate UUID
+    const { error } = idSchema.validate(id);
+    if (error) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Validation failed",
+          details: [
+            {
+              field: "id",
+              message: error.message,
+            },
+          ],
+        },
+        { status: 400 }
+      );
+    }
 
-    if (!game) {
+    const result = await pool.query(
+      `
+        SELECT 
+          id, name, genre, rating, price, description, 
+          release_date as "releaseDate", platform,
+          created_at as "createdAt", updated_at as "updatedAt"
+        FROM games 
+        WHERE id = $1
+      `,
+      [id]
+    );
+
+    if (result.rows.length > 0) {
+      return NextResponse.json({
+        success: true,
+        data: result.rows[0],
+        message: "Game retrieved successfully",
+      });
+    } else {
       return NextResponse.json(
         {
           success: false,
@@ -20,12 +65,6 @@ export async function GET(
         { status: 404 }
       );
     }
-
-    return NextResponse.json({
-      success: true,
-      data: game,
-      message: "Game retrieved successfully",
-    });
   } catch (error) {
     console.error("GET /api/games/[id] error:", error);
     return NextResponse.json(
@@ -38,17 +77,95 @@ export async function GET(
   }
 }
 
+// PUT /api/games/[id] - Update a game
 export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    // Verify authentication
+    const user = verifyToken(request);
+    if (!user) {
+      return NextResponse.json(
+        { success: false, error: "Access token required" },
+        { status: 401 }
+      );
+    }
+
     const { id } = await params;
     const body = await request.json();
 
-    const gameIndex = games.findIndex((g) => g.id === id);
+    // Validate UUID
+    const { error: idError } = idSchema.validate(id);
+    if (idError) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Validation failed",
+          details: [
+            {
+              field: "id",
+              message: idError.message,
+            },
+          ],
+        },
+        { status: 400 }
+      );
+    }
 
-    if (gameIndex === -1) {
+    // Validate using Joi schema
+    const { error, value } = gameSchema.validate(body);
+    if (error) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Validation failed",
+          details: error.details.map((detail) => ({
+            field: detail.path.join("."),
+            message: detail.message,
+          })),
+        },
+        { status: 400 }
+      );
+    }
+
+    const { name, genre, rating, price, description, releaseDate, platform } =
+      value;
+
+    const result = await pool.query(
+      `
+        UPDATE games 
+        SET 
+          name = $1, genre = $2, rating = $3, price = $4, 
+          description = $5, release_date = $6, platform = $7, 
+          updated_at = CURRENT_TIMESTAMP,
+          updated_by = $9
+        WHERE id = $8
+        RETURNING 
+          id, name, genre, rating, price, description, 
+          release_date as "releaseDate", platform,
+          created_at as "createdAt", updated_at as "updatedAt"
+      `,
+      [
+        name,
+        genre,
+        rating,
+        price,
+        description || null,
+        releaseDate || null,
+        platform || null,
+        id,
+        user.userId,
+      ]
+    );
+
+    if (result.rows.length > 0) {
+      return NextResponse.json({
+        success: true,
+        data: result.rows[0],
+        message: "Game updated successfully",
+      });
+    } else {
       return NextResponse.json(
         {
           success: false,
@@ -57,66 +174,6 @@ export async function PUT(
         { status: 404 }
       );
     }
-
-    // Validate required fields
-    if (
-      !body.name ||
-      !body.genre ||
-      body.rating === undefined ||
-      body.price === undefined
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Validation failed",
-          details: "Name, genre, rating, and price are required",
-        },
-        { status: 400 }
-      );
-    }
-
-    // Validate rating and price ranges
-    if (body.rating < 0 || body.rating > 10) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Validation failed",
-          details: "Rating must be between 0 and 10",
-        },
-        { status: 400 }
-      );
-    }
-
-    if (body.price < 0) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Validation failed",
-          details: "Price must be non-negative",
-        },
-        { status: 400 }
-      );
-    }
-
-    const updatedGame: Game = {
-      ...games[gameIndex],
-      name: body.name.trim(),
-      genre: body.genre.trim(),
-      rating: Number(body.rating),
-      price: Number(body.price),
-      description: body.description?.trim() || undefined,
-      releaseDate: body.releaseDate || undefined,
-      platform: body.platform || undefined,
-      updatedAt: new Date().toISOString(),
-    };
-
-    games[gameIndex] = updatedGame;
-
-    return NextResponse.json({
-      success: true,
-      data: updatedGame,
-      message: "Game updated successfully",
-    });
   } catch (error) {
     console.error("PUT /api/games/[id] error:", error);
     return NextResponse.json(
@@ -129,16 +186,53 @@ export async function PUT(
   }
 }
 
+// DELETE /api/games/[id] - Delete a game
 export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    // Verify authentication
+    const user = verifyToken(request);
+    if (!user) {
+      return NextResponse.json(
+        { success: false, error: "Access token required" },
+        { status: 401 }
+      );
+    }
+
     const { id } = await params;
 
-    const gameIndex = games.findIndex((g) => g.id === id);
+    // Validate UUID
+    const { error } = idSchema.validate(id);
+    if (error) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Validation failed",
+          details: [
+            {
+              field: "id",
+              message: error.message,
+            },
+          ],
+        },
+        { status: 400 }
+      );
+    }
 
-    if (gameIndex === -1) {
+    const result = await pool.query(
+      "DELETE FROM games WHERE id = $1 RETURNING id",
+      [id]
+    );
+
+    if (result.rowCount && result.rowCount > 0) {
+      return NextResponse.json({
+        success: true,
+        data: null,
+        message: "Game deleted successfully",
+      });
+    } else {
       return NextResponse.json(
         {
           success: false,
@@ -147,14 +241,6 @@ export async function DELETE(
         { status: 404 }
       );
     }
-
-    games.splice(gameIndex, 1);
-
-    return NextResponse.json({
-      success: true,
-      data: null,
-      message: "Game deleted successfully",
-    });
   } catch (error) {
     console.error("DELETE /api/games/[id] error:", error);
     return NextResponse.json(

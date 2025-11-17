@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Game, ApiResponse } from "@/types/game";
+import { useAuth } from "@/contexts/AuthContext";
 
 export default function GameDetailPage({
   params,
@@ -17,19 +18,36 @@ export default function GameDetailPage({
   const [editedGame, setEditedGame] = useState<Partial<Game>>({});
   const router = useRouter();
   const [gameId, setGameId] = useState<string>("");
+  const { token, logout, isLoading: authLoading } = useAuth();
+
+  useEffect(() => {
+    if (!authLoading && !token) {
+      router.push("/login");
+    }
+  }, [token, authLoading, router]);
 
   useEffect(() => {
     params.then((p) => setGameId(p.id));
   }, [params]);
 
   useEffect(() => {
-    if (!gameId) return;
+    if (!gameId || !token) return;
 
     const fetchGame = async () => {
       try {
         setLoading(true);
-        const response = await fetch(`/api/games/${gameId}`);
+        const response = await fetch(`/api/games/${gameId}`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
         const data: ApiResponse<Game> = await response.json();
+
+        if (response.status === 401) {
+          logout();
+          router.push("/login");
+          return;
+        }
 
         if (data.success && data.data) {
           setGame(data.data);
@@ -46,26 +64,26 @@ export default function GameDetailPage({
     };
 
     fetchGame();
-  }, [gameId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gameId, token]);
 
   const handleSave = async () => {
-    if (!game) return;
+    if (!game || !token) return;
 
     try {
       const gameData = {
         ...editedGame,
         rating: Number(editedGame.rating),
         price: Number(editedGame.price),
-        platform:
-          typeof editedGame.platform === "string"
-            ? (editedGame.platform as string).split(",").map((p) => p.trim())
-            : editedGame.platform,
+        releaseDate: editedGame.releaseDate || null,
+        platform: editedGame.platform || null,
       };
 
       const response = await fetch(`/api/games/${game.id}`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify(gameData),
       });
@@ -86,11 +104,19 @@ export default function GameDetailPage({
   };
 
   const handleDelete = async () => {
-    if (!game || !confirm("Are you sure you want to delete this game?")) return;
+    if (
+      !game ||
+      !confirm("Are you sure you want to delete this game?") ||
+      !token
+    )
+      return;
 
     try {
       const response = await fetch(`/api/games/${game.id}`, {
         method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       });
 
       const data = await response.json();
@@ -106,7 +132,7 @@ export default function GameDetailPage({
     }
   };
 
-  if (loading) {
+  if (authLoading || loading) {
     return (
       <div className="min-h-screen bg-zinc-50 dark:bg-black p-8">
         <div className="max-w-4xl mx-auto">
@@ -199,7 +225,7 @@ export default function GameDetailPage({
                     onChange={(e) =>
                       setEditedGame({
                         ...editedGame,
-                        rating: parseFloat(e.target.value),
+                        rating: e.target.value,
                       })
                     }
                     className="w-full px-4 py-2 border border-zinc-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-800 text-black dark:text-white"
@@ -219,7 +245,7 @@ export default function GameDetailPage({
                     onChange={(e) =>
                       setEditedGame({
                         ...editedGame,
-                        price: parseFloat(e.target.value),
+                        price: e.target.value,
                       })
                     }
                     className="w-full px-4 py-2 border border-zinc-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-800 text-black dark:text-white"
@@ -233,7 +259,13 @@ export default function GameDetailPage({
                 </label>
                 <input
                   type="date"
-                  value={editedGame.releaseDate || ""}
+                  value={
+                    editedGame.releaseDate
+                      ? new Date(editedGame.releaseDate)
+                          .toISOString()
+                          .split("T")[0]
+                      : ""
+                  }
                   onChange={(e) =>
                     setEditedGame({
                       ...editedGame,
@@ -246,17 +278,16 @@ export default function GameDetailPage({
 
               <div>
                 <label className="block text-sm font-medium mb-2 text-black dark:text-white">
-                  Platforms (comma-separated)
+                  Platform
                 </label>
                 <input
                   type="text"
-                  value={
-                    Array.isArray(editedGame.platform)
-                      ? editedGame.platform.join(", ")
-                      : editedGame.platform || ""
-                  }
+                  value={editedGame.platform || ""}
                   onChange={(e) =>
-                    setEditedGame({ ...editedGame, platform: e.target.value })
+                    setEditedGame({
+                      ...editedGame,
+                      platform: e.target.value,
+                    })
                   }
                   className="w-full px-4 py-2 border border-zinc-300 dark:border-zinc-700 rounded-lg bg-white dark:bg-zinc-800 text-black dark:text-white"
                 />
@@ -314,7 +345,7 @@ export default function GameDetailPage({
                     Rating
                   </p>
                   <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">
-                    ⭐ {game.rating.toFixed(1)}
+                    ⭐ {game.rating}
                   </p>
                 </div>
                 <div>
@@ -322,7 +353,7 @@ export default function GameDetailPage({
                     Price
                   </p>
                   <p className="text-2xl font-bold text-green-600 dark:text-green-400">
-                    ${game.price.toFixed(2)}
+                    ${game.price}
                   </p>
                 </div>
                 {game.releaseDate && (
@@ -343,7 +374,7 @@ export default function GameDetailPage({
                     Platforms
                   </p>
                   <div className="flex flex-wrap gap-2">
-                    {game.platform.map((platform, idx) => (
+                    {game.platform.split(",").map((platform, idx) => (
                       <span
                         key={idx}
                         className="px-3 py-1 bg-zinc-200 dark:bg-zinc-800 rounded-lg text-zinc-700 dark:text-zinc-300"

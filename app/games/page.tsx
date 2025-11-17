@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Game, PaginatedResponse } from "@/types/game";
+import { useAuth } from "@/contexts/AuthContext";
 
 export default function GamesPage() {
   const [games, setGames] = useState<Game[]>([]);
@@ -22,7 +24,18 @@ export default function GamesPage() {
     platform: "",
   });
 
+  const { token, user, logout, isLoading: authLoading } = useAuth();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!authLoading && !token) {
+      router.push("/login");
+    }
+  }, [token, authLoading, router]);
+
   const fetchGames = async () => {
+    if (!token) return;
+
     try {
       setLoading(true);
       const params = new URLSearchParams({
@@ -31,8 +44,18 @@ export default function GamesPage() {
         search: searchTerm,
       });
 
-      const response = await fetch(`/api/games?${params}`);
+      const response = await fetch(`/api/games?${params}`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
       const data: PaginatedResponse<Game> = await response.json();
+
+      if (response.status === 401) {
+        logout();
+        router.push("/login");
+        return;
+      }
 
       if (data.success) {
         setGames(data.data);
@@ -49,15 +72,22 @@ export default function GamesPage() {
   };
 
   useEffect(() => {
-    fetchGames();
-  }, [currentPage, searchTerm]);
+    if (token) {
+      fetchGames();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPage, searchTerm, token]);
 
   const handleDelete = async (id: string) => {
-    if (!confirm("Are you sure you want to delete this game?")) return;
+    if (!confirm("Are you sure you want to delete this game?") || !token)
+      return;
 
     try {
       const response = await fetch(`/api/games/${id}`, {
         method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       });
 
       const data = await response.json();
@@ -76,20 +106,22 @@ export default function GamesPage() {
   const handleAddGame = async (e: React.FormEvent) => {
     e.preventDefault();
 
+    if (!token) return;
+
     try {
       const gameData = {
         ...newGame,
         rating: Number(newGame.rating),
         price: Number(newGame.price),
-        platform: newGame.platform
-          ? newGame.platform.split(",").map((p) => p.trim())
-          : undefined,
+        releaseDate: newGame.releaseDate || null,
+        platform: newGame.platform || null,
       };
 
       const response = await fetch("/api/games", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify(gameData),
       });
@@ -117,7 +149,7 @@ export default function GamesPage() {
     }
   };
 
-  if (loading && games.length === 0) {
+  if (authLoading || (loading && games.length === 0)) {
     return (
       <div className="min-h-screen bg-zinc-50 dark:bg-black p-8">
         <div className="max-w-7xl mx-auto">
@@ -133,15 +165,30 @@ export default function GamesPage() {
     <div className="min-h-screen bg-zinc-50 dark:bg-black p-8">
       <div className="max-w-7xl mx-auto">
         <div className="flex justify-between items-center mb-8">
-          <h1 className="text-4xl font-bold text-black dark:text-white">
-            Game Library
-          </h1>
-          <Link
-            href="/"
-            className="px-4 py-2 bg-zinc-200 dark:bg-zinc-800 rounded-lg hover:bg-zinc-300 dark:hover:bg-zinc-700 text-black dark:text-white"
-          >
-            Home
-          </Link>
+          <div>
+            <h1 className="text-4xl font-bold text-black dark:text-white">
+              Game Library
+            </h1>
+            {user && (
+              <p className="text-zinc-600 dark:text-zinc-400 mt-2">
+                Welcome, {user.name}
+              </p>
+            )}
+          </div>
+          <div className="flex gap-4">
+            <button
+              onClick={logout}
+              className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+            >
+              Logout
+            </button>
+            <Link
+              href="/"
+              className="px-4 py-2 bg-zinc-200 dark:bg-zinc-800 rounded-lg hover:bg-zinc-300 dark:hover:bg-zinc-700 text-black dark:text-white"
+            >
+              Home
+            </Link>
+          </div>
         </div>
 
         {error && (
@@ -234,7 +281,7 @@ export default function GamesPage() {
               />
               <input
                 type="text"
-                placeholder="Platforms (comma-separated)"
+                placeholder="Platform"
                 value={newGame.platform}
                 onChange={(e) =>
                   setNewGame({ ...newGame, platform: e.target.value })
@@ -274,10 +321,10 @@ export default function GamesPage() {
               </p>
               <div className="flex items-center gap-4 mb-2">
                 <span className="text-yellow-600 dark:text-yellow-400 font-semibold">
-                  ⭐ {game.rating.toFixed(1)}
+                  ⭐ {game.rating}
                 </span>
                 <span className="text-green-600 dark:text-green-400 font-semibold">
-                  ${game.price.toFixed(2)}
+                  ${game.price}
                 </span>
               </div>
               {game.description && (
@@ -291,7 +338,7 @@ export default function GamesPage() {
                     Platforms:
                   </p>
                   <div className="flex flex-wrap gap-1">
-                    {game.platform.map((platform, idx) => (
+                    {game.platform.split(",").map((platform, idx) => (
                       <span
                         key={idx}
                         className="px-2 py-1 text-xs bg-zinc-200 dark:bg-zinc-800 rounded text-zinc-700 dark:text-zinc-300"

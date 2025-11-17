@@ -1,61 +1,74 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Game } from "@/types/game";
-import { games } from "@/lib/games-data";
+import pool from "@/lib/db";
+import { gameSchema } from "@/lib/validation";
+import { verifyToken } from "@/lib/auth";
 
 // GET /api/games - Get all games with pagination and search
 export async function GET(request: NextRequest) {
   try {
+    // Verify authentication
+    const user = verifyToken(request);
+    if (!user) {
+      return NextResponse.json(
+        { success: false, error: "Access token required" },
+        { status: 401 }
+      );
+    }
+
     const searchParams = request.nextUrl.searchParams;
     const page = Math.max(1, parseInt(searchParams.get("page") || "1"));
     const limit = Math.min(
       100,
       Math.max(1, parseInt(searchParams.get("limit") || "10"))
     );
-    const search = searchParams.get("search") || "";
+    const offset = (page - 1) * limit;
     const sortBy = searchParams.get("sortBy") || "name";
-    const sortOrder = searchParams.get("sortOrder") === "desc" ? "desc" : "asc";
+    const sortOrder = searchParams.get("sortOrder") === "desc" ? "DESC" : "ASC";
+    const search = searchParams.get("search") || "";
 
-    // Filter games by search
-    let filteredGames = games;
+    // Valid sort columns
+    const validSortColumns = ["name", "genre", "rating", "price", "created_at"];
+    const sortColumn = validSortColumns.includes(sortBy) ? sortBy : "name";
+
+    let query = `
+      SELECT 
+        id, name, genre, rating, price, description, 
+        release_date as "releaseDate", platform,
+        created_at as "createdAt", updated_at as "updatedAt"
+      FROM games 
+    `;
+    let countQuery = "SELECT COUNT(*) FROM games";
+    const queryParams: (string | number)[] = [];
+    const countParams: string[] = [];
+
+    // Add search filter if provided
     if (search) {
-      const searchLower = search.toLowerCase();
-      filteredGames = games.filter(
-        (game) =>
-          game.name.toLowerCase().includes(searchLower) ||
-          game.genre.toLowerCase().includes(searchLower) ||
-          game.description?.toLowerCase().includes(searchLower)
-      );
+      const searchCondition =
+        " WHERE (name ILIKE $1 OR genre ILIKE $1 OR description ILIKE $1)";
+      query += searchCondition;
+      countQuery += searchCondition;
+      queryParams.push(`%${search}%`);
+      countParams.push(`%${search}%`);
     }
 
-    // Sort games
-    const sortedGames = [...filteredGames].sort((a, b) => {
-      const aValue = a[sortBy as keyof Game];
-      const bValue = b[sortBy as keyof Game];
+    // Add sorting and pagination
+    query += ` ORDER BY ${sortColumn} ${sortOrder} LIMIT $${
+      queryParams.length + 1
+    } OFFSET $${queryParams.length + 2}`;
+    queryParams.push(limit, offset);
 
-      if (aValue === undefined || bValue === undefined) return 0;
+    // Execute both queries
+    const [gamesResult, countResult] = await Promise.all([
+      pool.query(query, queryParams),
+      pool.query(countQuery, countParams),
+    ]);
 
-      if (typeof aValue === "string" && typeof bValue === "string") {
-        return sortOrder === "asc"
-          ? aValue.localeCompare(bValue)
-          : bValue.localeCompare(aValue);
-      }
-
-      if (typeof aValue === "number" && typeof bValue === "number") {
-        return sortOrder === "asc" ? aValue - bValue : bValue - aValue;
-      }
-
-      return 0;
-    });
-
-    // Paginate
-    const totalItems = sortedGames.length;
+    const totalItems = parseInt(countResult.rows[0].count);
     const totalPages = Math.ceil(totalItems / limit);
-    const offset = (page - 1) * limit;
-    const paginatedGames = sortedGames.slice(offset, offset + limit);
 
     return NextResponse.json({
       success: true,
-      data: paginatedGames,
+      data: gamesResult.rows,
       meta: {
         currentPage: page,
         totalPages,
@@ -81,73 +94,83 @@ export async function GET(request: NextRequest) {
 // POST /api/games - Create a new game
 export async function POST(request: NextRequest) {
   try {
+    // Verify authentication
+    const user = verifyToken(request);
+    if (!user) {
+      return NextResponse.json(
+        { success: false, error: "Access token required" },
+        { status: 401 }
+      );
+    }
+
     const body = await request.json();
 
-    // Validate required fields
-    if (
-      !body.name ||
-      !body.genre ||
-      body.rating === undefined ||
-      body.price === undefined
-    ) {
+    // Validate using Joi schema
+    const { error, value } = gameSchema.validate(body);
+    if (error) {
       return NextResponse.json(
         {
           success: false,
           error: "Validation failed",
-          details: "Name, genre, rating, and price are required",
+          details: error.details.map((detail) => ({
+            field: detail.path.join("."),
+            message: detail.message,
+          })),
         },
         { status: 400 }
       );
     }
 
-    // Validate rating and price ranges
-    if (body.rating < 0 || body.rating > 10) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Validation failed",
-          details: "Rating must be between 0 and 10",
-        },
-        { status: 400 }
-      );
-    }
+    const { name, genre, rating, price, description, releaseDate, platform } =
+      value;
 
-    if (body.price < 0) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Validation failed",
-          details: "Price must be non-negative",
-        },
-        { status: 400 }
-      );
-    }
-
-    const newGame: Game = {
-      id: Date.now().toString(),
-      name: body.name.trim(),
-      genre: body.genre.trim(),
-      rating: Number(body.rating),
-      price: Number(body.price),
-      description: body.description?.trim() || undefined,
-      releaseDate: body.releaseDate || undefined,
-      platform: body.platform || undefined,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    games.push(newGame);
+    const result = await pool.query(
+      `
+        INSERT INTO games (name, genre, rating, price, description, release_date, platform, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING 
+          id, name, genre, rating, price, description, 
+          release_date as "releaseDate", platform,
+          created_at as "createdAt", updated_at as "updatedAt"
+      `,
+      [
+        name,
+        genre,
+        rating,
+        price,
+        description || null,
+        releaseDate || null,
+        platform || null,
+        user.userId,
+      ]
+    );
 
     return NextResponse.json(
       {
         success: true,
-        data: newGame,
+        data: result.rows[0],
         message: "Game created successfully",
       },
       { status: 201 }
     );
-  } catch (error) {
+  } catch (error: unknown) {
     console.error("POST /api/games error:", error);
+
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "23505"
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Game with this name already exists",
+        },
+        { status: 409 }
+      );
+    }
+
     return NextResponse.json(
       {
         success: false,

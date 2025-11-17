@@ -2,13 +2,13 @@ export interface Game {
   id: string;
   name: string;
   genre: string;
-  rating: number;
-  price: number;
+  rating: string;
+  price: string;
   description?: string;
   releaseDate?: string;
-  platform?: string[];
-  createdAt?: string;
-  updatedAt?: string;
+  platform?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 export interface ApiResponse<T> {
